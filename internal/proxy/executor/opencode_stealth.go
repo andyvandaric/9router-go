@@ -6,11 +6,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/providers"
@@ -20,6 +22,7 @@ import (
 	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 	tls "github.com/bogdanfinn/utls"
+	xproxy "golang.org/x/net/proxy"
 )
 
 // opencodeStealthClient dials opencode.ai with the Bun/BoringSSL TLS fingerprint
@@ -161,20 +164,84 @@ func newOpencodeClientProfile() profiles.ClientProfile {
 }
 
 // newOpencodeStealthClient constructs an HttpClient with proxy support and no redirects.
+// For SOCKS5/SOCKS5h proxies, ?dns=local is respected by resolving target hostnames locally.
 func newOpencodeStealthClient(reference *http.Client) (*opencodeStealthClient, error) {
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(120),
 		tls_client.WithClientProfile(newOpencodeClientProfile()),
 		tls_client.WithNotFollowRedirects(),
 	}
-	if proxyURL := opencodeProxyFrom(reference); proxyURL != "" {
-		options = append(options, tls_client.WithProxyUrl(strings.TrimRight(proxyURL, "/")))
+	if proxyURLStr := opencodeProxyFrom(reference); proxyURLStr != "" {
+		trimmedURL := strings.TrimRight(proxyURLStr, "/")
+		parsedURL, err := url.Parse(trimmedURL)
+		if err != nil {
+			return nil, fmt.Errorf("opencode: parse proxy url %q: %w", trimmedURL, err)
+		}
+		scheme := strings.ToLower(parsedURL.Scheme)
+		if scheme == "socks5" || scheme == "socks5h" {
+			dnsMode, err := proxy.ParseSOCKS5DNSMode(parsedURL)
+			if err != nil {
+				return nil, err
+			}
+			factory := func(proxyUrlStr string, timeout time.Duration, localAddr *net.TCPAddr, connectHeaders fhttp.Header, logger tls_client.Logger) (xproxy.ContextDialer, error) {
+				forwardDialer := net.Dialer{
+					Timeout: timeout,
+				}
+				if localAddr != nil {
+					forwardDialer.LocalAddr = localAddr
+				}
+				var auth *xproxy.Auth
+				if parsedURL.User != nil {
+					auth = &xproxy.Auth{
+						User: parsedURL.User.Username(),
+					}
+					if p, ok := parsedURL.User.Password(); ok {
+						auth.Password = p
+					}
+				}
+				socksDialer, err := xproxy.SOCKS5("tcp", parsedURL.Host, auth, &forwardDialer)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create socks5 proxy: %w", err)
+				}
+				return &opencodeSocksContextDialer{
+					socksDialer: socksDialer,
+					dnsMode:     dnsMode,
+				}, nil
+			}
+			options = append(options, tls_client.WithProxyDialerFactory(factory))
+		} else {
+			options = append(options, tls_client.WithProxyUrl(trimmedURL))
+		}
 	}
 	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 	if err != nil {
 		return nil, fmt.Errorf("opencode: build stealth TLS client: %w", err)
 	}
 	return &opencodeStealthClient{client: client}, nil
+}
+
+type opencodeSocksContextDialer struct {
+	socksDialer xproxy.Dialer
+	dnsMode     proxy.SOCKS5DNSMode
+}
+
+func (s *opencodeSocksContextDialer) Dial(network, addr string) (net.Conn, error) {
+	return s.DialContext(context.Background(), network, addr)
+}
+
+func (s *opencodeSocksContextDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	targetAddr := addr
+	if s.dnsMode == proxy.DNSModeLocal {
+		resolved, err := proxy.ResolveLocalSOCKS5Target(ctx, addr, s.dnsMode)
+		if err != nil {
+			return nil, err
+		}
+		targetAddr = resolved
+	}
+	if cd, ok := s.socksDialer.(xproxy.ContextDialer); ok {
+		return cd.DialContext(ctx, network, targetAddr)
+	}
+	return s.socksDialer.Dial(network, targetAddr)
 }
 
 // opencodeProxyFrom recovers the proxy configured in reference.Transport.
@@ -282,7 +349,17 @@ func forwardOpencodeRequest(ctx context.Context, client *http.Client, cfg *provi
 	} else {
 		headers["Accept"] = "*/*"
 	}
-	return stealth.forward(ctx, cfg.BaseURL, headers, body)
+	resp, err := stealth.forward(ctx, cfg.BaseURL, headers, body)
+	if client != nil && err == nil && resp != nil {
+		if isFreeTier, _ := IsFreeTierResponse(resp); isFreeTier {
+			if proxy.ForbidsDirectReplay(client) {
+				return resp, nil
+			}
+			_ = resp.Body.Close()
+			return forwardOpencodeRequest(ctx, nil, cfg, apiKey, body, isStream)
+		}
+	}
+	return resp, err
 }
 
 // opencodePlainHTTP reports whether the stealth stack is turned off via environment variable.
