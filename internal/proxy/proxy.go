@@ -8,13 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 
+	"9router/proxy/internal/constants"
 	"9router/proxy/internal/log"
+	xproxy "golang.org/x/net/proxy"
 )
 
 // UpstreamError captures a non-200 upstream response.
@@ -109,10 +112,74 @@ func InsecureClientFor(proxyURL string) *http.Client {
 		return client
 	}
 	transport := NewSafeTransportForProxy(proxyURL)
+	if transport == nil {
+		return directProxyClient
+	}
 	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	client = &http.Client{Transport: transport, Timeout: directProxyClient.Timeout}
 	insecureClients[proxyURL] = client
 	return client
+}
+
+// NewSafeTransportForProxy returns NewSafeTransport's transport for a caller
+// that installs its own proxy: the proxy is set on the transport and its
+// endpoint is exempted from the private-IP guard. An empty or unparseable
+// proxyURL falls back to the ambient path, so a malformed pool URL cannot
+// silently turn into a direct dial. For SOCKS5 proxy URLs, the DNS resolution
+// mode is parsed via ParseSOCKS5DNSMode, and ResolveLocalSOCKS5Target is wired
+// into the dialer so target hosts are resolved locally when DNSModeLocal is active.
+func NewSafeTransportForProxy(proxyURL string) *http.Transport {
+	t := constants.DefaultHTTPTransportConfig.NewTransport()
+	if proxyURL != "" {
+		if u, err := url.Parse(proxyURL); err == nil && u.Host != "" {
+			scheme := strings.ToLower(u.Scheme)
+			if scheme == "socks5" || scheme == "socks5h" {
+				dnsMode, err := ParseSOCKS5DNSMode(u)
+				if err != nil {
+					return nil
+				}
+				var auth *xproxy.Auth
+				if u.User != nil {
+					auth = &xproxy.Auth{
+						User: u.User.Username(),
+					}
+					if p, ok := u.User.Password(); ok {
+						auth.Password = p
+					}
+				}
+				forward := newSafeDialerForProxy(newProxyAllowlist(u.Host))
+				socksDialer, err := xproxy.SOCKS5("tcp", u.Host, auth, forward)
+				if err != nil {
+					return nil
+				}
+				t.Proxy = http.ProxyURL(u)
+				t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					if addr == u.Host {
+						return forward.DialContext(ctx, network, addr)
+					}
+					targetAddr := addr
+					if dnsMode == DNSModeLocal {
+						resolved, err := ResolveLocalSOCKS5Target(ctx, addr, dnsMode)
+						if err != nil {
+							return nil, err
+						}
+						targetAddr = resolved
+					}
+					if cd, ok := socksDialer.(xproxy.ContextDialer); ok {
+						return cd.DialContext(ctx, network, targetAddr)
+					}
+					return socksDialer.Dial(network, targetAddr)
+				}
+				return t
+			}
+
+			t.Proxy = http.ProxyURL(u)
+			t.DialContext = newSafeDialerForProxy(newProxyAllowlist(u.Host)).DialContext
+			return t
+		}
+	}
+	t.DialContext = newSafeDialerForProxy(ambientProxyAllowlist()).DialContext
+	return t
 }
 
 func isProxyFailure(err error, resp *http.Response) bool {
