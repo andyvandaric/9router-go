@@ -50,3 +50,8 @@ stitch-screenshots/
 # A pasted browser-login credential for scripts/deepseek-web-live.sh. Never
 # belongs in a commit, and `git add -A` would otherwise stage it silently.
 .ds-token
+
+# Agent session scratch — per-session permission state, task cursors and replay
+# logs. Machine-local and rewritten on every turn, so never part of a commit.
+.claude/state/
+.omc/

@@ -322,6 +322,8 @@ func (t forbidDirectReplayTransport) RoundTrip(req *http.Request) (*http.Respons
 	return t.base.RoundTrip(req)
 }
 
+func (t forbidDirectReplayTransport) Unwrap() http.RoundTripper { return t.base }
+
 func (forbidDirectReplayTransport) forbidsDirectReplay() bool { return true }
 
 // ForbidDirectReplay returns a client whose requests may never be replayed

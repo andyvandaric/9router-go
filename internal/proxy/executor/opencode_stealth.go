@@ -246,22 +246,36 @@ func (s *opencodeSocksContextDialer) DialContext(ctx context.Context, network, a
 
 // opencodeProxyFrom recovers the proxy configured in reference.Transport.
 func opencodeProxyFrom(reference *http.Client) string {
-	if reference == nil {
+	if reference == nil || reference.Transport == nil {
 		return ""
 	}
-	transport, ok := reference.Transport.(*http.Transport)
-	if !ok || transport.Proxy == nil {
-		return ""
+	// Check direct transport or unwrapped RoundTripper
+	type baseTransportGetter interface {
+		BaseTransport() http.RoundTripper
 	}
-	target, err := url.Parse("https://opencode.ai")
-	if err != nil {
-		return ""
+	tr := reference.Transport
+	for {
+		if t, ok := tr.(*http.Transport); ok {
+			if t.Proxy == nil {
+				return ""
+			}
+			target, err := url.Parse("https://opencode.ai")
+			if err != nil {
+				return ""
+			}
+			proxyURL, err := t.Proxy(&http.Request{URL: target})
+			if err != nil || proxyURL == nil {
+				return ""
+			}
+			return strings.TrimRight(proxyURL.String(), "/")
+		}
+		if wrapper, ok := tr.(interface{ Unwrap() http.RoundTripper }); ok {
+			tr = wrapper.Unwrap()
+			continue
+		}
+		break
 	}
-	proxyURL, err := transport.Proxy(&http.Request{URL: target})
-	if err != nil || proxyURL == nil {
-		return ""
-	}
-	return strings.TrimRight(proxyURL.String(), "/")
+	return ""
 }
 
 func getOpencodeStealthClient(reference *http.Client) (*opencodeStealthClient, error) {
