@@ -14,6 +14,7 @@
 **Duration:** 1h 45m  
 **Last Updated:** 2026-10-20 00:05 (UTC+0700) (All 3 Waves 100% Green & Verified)  
 **Verification Verdict:** STAMP OF APPROVAL (All Waves Green)  
+**Post-Completion Follow-up Commit:** `e648291` — `fix(proxy): unwrap transport chain so forbidDirectReplay survives wrappers [phase-02]` (RoundTripper Unwrap chain restore + settings.json regression revert + scratch gitignore; build OK, `go test -count=1 ./internal/proxy/...` 4/4 PASS; independently verified STAMP OF APPROVAL by Verifier Astrid)  
 **Next Milestone:** Final Release & Tagging v1.9.14  
 **Primary Keywords:** 9router-go, socks5-local-dns, freetier-replay, opencode-stealth, vpsease-integration  
 
