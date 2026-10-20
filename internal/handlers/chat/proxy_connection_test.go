@@ -69,6 +69,68 @@ func TestGetClientForConnection_ProxyPool(t *testing.T) {
 	}
 }
 
+func TestGetClientForConnection_Socks5ProxyPool(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+
+	if _, err := database.Exec(`CREATE TABLE IF NOT EXISTS proxyPools (
+		id TEXT PRIMARY KEY,
+		isActive INTEGER DEFAULT 1,
+		testStatus TEXT,
+		data TEXT NOT NULL,
+		createdAt TEXT NOT NULL,
+		updatedAt TEXT NOT NULL
+	);`); err != nil {
+		t.Fatalf("failed to create proxyPools table: %v", err)
+	}
+
+	repo := db.NewRepo(database)
+	pool, err := repo.InsertProxyPool(db.ProxyPoolData{
+		Name:     "socks-proxy",
+		ProxyURL: "socks5://127.0.0.1:1080?dns=local",
+		Type:     "socks5",
+	})
+	if err != nil {
+		t.Fatalf("failed to insert proxy pool: %v", err)
+	}
+
+	poolID := pool["id"].(string)
+
+	h := &ChatHandler{
+		Client: &http.Client{},
+		Repo:   repo,
+	}
+
+	connData := &ConnectionData{
+		ProxyPoolID: poolID,
+	}
+
+	client, err := h.GetClientForConnection(connData)
+	if err != nil {
+		t.Fatalf("client for connection: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+	if client == h.Client {
+		t.Fatal("expected new client with custom proxy transport for socks5, got default client (silent bypass)")
+	}
+
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatal("expected *http.Transport")
+	}
+
+	req, _ := http.NewRequest("GET", "https://api.openai.com/v1/models", nil)
+	proxyURL, err := transport.Proxy(req)
+	if err != nil {
+		t.Fatalf("proxy resolve error: %v", err)
+	}
+	if proxyURL == nil || proxyURL.String() != "socks5://127.0.0.1:1080?dns=local" {
+		t.Errorf("expected proxy URL socks5://127.0.0.1:1080?dns=local, got %v", proxyURL)
+	}
+}
+
 // A Vercel relay pasted into a pool declared "http" must never be dialed as a
 // CONNECT proxy: that answers "malformed HTTP status code". The plain client is
 // returned, and getProviderConfig routes the request through the relay via its

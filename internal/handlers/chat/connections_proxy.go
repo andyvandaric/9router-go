@@ -171,7 +171,16 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 		return h.Client, nil
 	}
 
-	if proxyType == "http" || proxyType == "" {
+	if proxyType == "http" || proxyType == "socks5" || proxyType == "" {
+		if proxyType == "socks5" || strings.HasPrefix(strings.ToLower(parsedURL.Scheme), "socks5") {
+			if _, err := internalproxy.ParseSOCKS5DNSMode(parsedURL); err != nil {
+				if strictProxy {
+					return nil, fmt.Errorf("%w: %w", internalproxy.ErrStrictProxyRequired, err)
+				}
+				return nil, err
+			}
+		}
+
 		cacheKey := proxyURLStr
 		if strictProxy {
 			cacheKey = strictCachePrefix + proxyURLStr
@@ -199,6 +208,12 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 		}
 
 		baseTransport := internalproxy.NewSafeTransportForProxy(parsedURL.String())
+		if baseTransport == nil {
+			if strictProxy {
+				return nil, fmt.Errorf("%w: invalid proxy transport", internalproxy.ErrStrictProxyRequired)
+			}
+			return h.Client, nil
+		}
 		client = &http.Client{
 			Transport: baseTransport,
 			Timeout:   h.Client.Timeout,

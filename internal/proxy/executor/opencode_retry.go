@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -30,7 +31,29 @@ const (
 	// as a token rather than the prose, because the message has already been
 	// reworded once ("...Download it at https://opencode.ai and keep building.").
 	openCodeRefusalToken = "FreeTierError"
+
+	// maxFreeTierBodyInspectionLimit limits reading the response body to 1MB
+	// to prevent unbounded buffering on malicious/oversized payloads.
+	maxFreeTierBodyInspectionLimit = 1024 * 1024
 )
+
+// IsFreeTierResponse reports whether the HTTP response represents an OpenCode free-tier
+// gate refusal (HTTP 403 containing "FreeTierError"). If inspected, resp.Body is fully
+// restored so callers can read it again without data loss.
+func IsFreeTierResponse(resp *http.Response) (bool, error) {
+	if resp == nil || resp.StatusCode != http.StatusForbidden || resp.Body == nil {
+		return false, nil
+	}
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxFreeTierBodyInspectionLimit))
+	if err != nil {
+		return false, err
+	}
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+	return bytes.Contains(bodyBytes, []byte(openCodeRefusalToken)), nil
+}
 
 // isOpenCodeRefusal reports whether a failure is the gate refusing this
 // request, as opposed to a genuine account, quota or auth error. Only this

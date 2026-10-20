@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"9router/proxy/internal/providers"
+	"9router/proxy/internal/proxy"
 )
 
 func TestOpencodeStealthClient_BunProfileSpec(t *testing.T) {
@@ -127,6 +129,57 @@ func TestForwardOpencodeRequest_PlainHTTPForMockServer(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestNewOpencodeStealthClient_SOCKS5DNSLocal(t *testing.T) {
+	proxyTarget, _ := url.Parse("socks5://127.0.0.1:1080?dns=local")
+	reference := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyTarget),
+		},
+	}
+	client, err := newOpencodeStealthClient(reference)
+	if err != nil {
+		t.Fatalf("newOpencodeStealthClient() with dns=local error = %v", err)
+	}
+	if client == nil || client.client == nil {
+		t.Fatal("expected non-nil stealth client for socks5 with dns=local")
+	}
+}
+
+func TestNewOpencodeStealthClient_SOCKS5DNSRemote(t *testing.T) {
+	proxyTarget, _ := url.Parse("socks5://127.0.0.1:1080?dns=remote")
+	reference := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyTarget),
+		},
+	}
+	client, err := newOpencodeStealthClient(reference)
+	if err != nil {
+		t.Fatalf("newOpencodeStealthClient() with dns=remote error = %v", err)
+	}
+	if client == nil || client.client == nil {
+		t.Fatal("expected non-nil stealth client for socks5 with dns=remote")
+	}
+}
+
+func TestNewOpencodeStealthClient_SOCKS5InvalidDNSMode_FailClosed(t *testing.T) {
+	proxyTarget, _ := url.Parse("socks5://127.0.0.1:1080?dns=invalid")
+	reference := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyTarget),
+		},
+	}
+	client, err := newOpencodeStealthClient(reference)
+	if err == nil {
+		t.Fatal("expected error for invalid DNS mode, got nil")
+	}
+	if !errors.Is(err, proxy.ErrProxyDNSMode) {
+		t.Errorf("expected errors.Is(err, proxy.ErrProxyDNSMode), got %v", err)
+	}
+	if client != nil {
+		t.Error("expected nil client for invalid DNS mode (fail-closed), got non-nil")
 	}
 }
 

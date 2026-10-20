@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -12,15 +13,88 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"9router/proxy/internal/constants"
 )
 
 var (
 	// ErrSSRFBlocked is returned when an outbound dial attempts to reach a private,
 	// loopback, link-local, or cloud metadata IP address without authorization.
 	ErrSSRFBlocked = errors.New("request to private/reserved IP blocked by SSRF protection")
+
+	// ErrProxyDNSMode is returned when a proxy URL specifies an unrecognized or invalid DNS resolution mode.
+	ErrProxyDNSMode = errors.New("Invalid proxy DNS mode: use dns=local or dns=remote on a SOCKS5 URL")
 )
+
+// SOCKS5DNSMode defines how domain names in SOCKS5 target addresses are resolved.
+type SOCKS5DNSMode string
+
+const (
+	// DNSModeLocal resolves domain names locally before sending the SOCKS5 CONNECT command.
+	DNSModeLocal SOCKS5DNSMode = "local"
+	// DNSModeRemote lets the remote SOCKS5 proxy resolve domain names.
+	DNSModeRemote SOCKS5DNSMode = "remote"
+)
+
+// ParseSOCKS5DNSMode parses the dns query parameter (?dns=local or ?dns=remote) from a SOCKS5 proxy URL.
+// If the dns parameter is omitted, it defaults to DNSModeRemote.
+func ParseSOCKS5DNSMode(u *url.URL) (SOCKS5DNSMode, error) {
+	if u == nil {
+		return "", ErrProxyDNSMode
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "socks5" && scheme != "socks5h" {
+		return "", ErrProxyDNSMode
+	}
+	q := u.Query()
+	dnsVals, exists := q["dns"]
+	if !exists || len(dnsVals) == 0 {
+		return DNSModeRemote, nil
+	}
+	if len(dnsVals) != 1 {
+		return "", ErrProxyDNSMode
+	}
+	val := strings.ToLower(strings.TrimSpace(dnsVals[0]))
+	switch SOCKS5DNSMode(val) {
+	case DNSModeLocal:
+		return DNSModeLocal, nil
+	case DNSModeRemote:
+		return DNSModeRemote, nil
+	default:
+		return "", ErrProxyDNSMode
+	}
+}
+
+// ResolveLocalSOCKS5Target resolves targetAddr locally if mode is DNSModeLocal.
+// If targetAddr is already an IP address or mode is DNSModeRemote, it returns targetAddr unchanged.
+func ResolveLocalSOCKS5Target(ctx context.Context, targetAddr string, mode SOCKS5DNSMode) (string, error) {
+	if mode != DNSModeLocal {
+		return targetAddr, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	host, port, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		return "", fmt.Errorf("split host port %s: %w", targetAddr, err)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return targetAddr, nil
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return "", fmt.Errorf("resolve local socks5 target %s: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return "", fmt.Errorf("resolve local socks5 target %s: no addresses found", host)
+	}
+	selectedIP := ips[0]
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			selectedIP = ip
+			break
+		}
+	}
+	return net.JoinHostPort(selectedIP.String(), port), nil
+}
 
 type allowLoopbackKey struct{}
 
@@ -223,22 +297,4 @@ func newSafeDialerForProxy(allow *proxyAllowlist) *net.Dialer {
 // endpoint that environment names.
 func NewSafeTransport() *http.Transport {
 	return NewSafeTransportForProxy("")
-}
-
-// NewSafeTransportForProxy returns NewSafeTransport's transport for a caller
-// that installs its own proxy: the proxy is set on the transport and its
-// endpoint is exempted from the private-IP guard. An empty or unparseable
-// proxyURL falls back to the ambient path, so a malformed pool URL cannot
-// silently turn into a direct dial.
-func NewSafeTransportForProxy(proxyURL string) *http.Transport {
-	t := constants.DefaultHTTPTransportConfig.NewTransport()
-	if proxyURL != "" {
-		if u, err := url.Parse(proxyURL); err == nil && u.Host != "" {
-			t.Proxy = http.ProxyURL(u)
-			t.DialContext = newSafeDialerForProxy(newProxyAllowlist(u.Host)).DialContext
-			return t
-		}
-	}
-	t.DialContext = newSafeDialerForProxy(ambientProxyAllowlist()).DialContext
-	return t
 }
